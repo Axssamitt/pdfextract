@@ -25,10 +25,10 @@ jobs:
 
     - name: Compilar com PyInstaller
       run: |
-        pyinstaller --onefile --windowed --name ExtratorPDF col10.py
+        pyinstaller --onefile --windowed --name ExtratorPDF col9.py
 
     - name: Salvar o executável
       uses: actions/upload-artifact@v4
       with:
         name: ExtratorPDF-Windows
-        path: dist/ExtratorPDF.exe
+        path: dist/ExtratorPDF9.exe
