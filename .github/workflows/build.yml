@@ -1,0 +1,31 @@
+name: Compilar Extrator PDF para Windows
+
+on:
+  workflow_dispatch: # Botão para rodar manualmente no GitHub
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Baixar codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compilar executavel com PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name "ExtratorPDF" --collect-all pdfplumber --hidden-import=openpyxl.cell._writer col10.py
+
+      - name: Disponibilizar EXE para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExtratorPDF-Windows
+          path: dist/ExtratorPDF.exe
