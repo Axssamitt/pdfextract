@@ -1,0 +1,91 @@
+name: Build Portable Python for Windows
+
+on:
+  # Permite rodar o workflow manualmente, podendo escolher a versão do Python
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: 'Versão do Python (ex: 3.12.8)'
+        required: true
+        default: '3.12.8'
+  # (Opcional) Agenda uma execução semanal para manter o pacote atualizado
+  # schedule:
+  #   - cron: '0 0 * * 0'
+
+jobs:
+  build:
+    # A mágica acontece aqui: usamos um runner do Windows, mesmo estando no Linux
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Definir variáveis de ambiente
+        id: vars
+        run: |
+          $version = "${{ github.event.inputs.python_version }}"
+          $embedUrl = "https://www.python.org/ftp/python/$version/python-$version-embed-amd64.zip"
+          echo "EMBED_URL=$embedUrl" >> $env:GITHUB_ENV
+          echo "PYTHON_VERSION=$version" >> $env:GITHUB_ENV
+          echo "GET_PIP_URL=https://bootstrap.pypa.io/get-pip.py" >> $env:GITHUB_ENV
+          echo "PORTABLE_DIR=python-portable" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Baixar e extrair o Python Embeddable
+        run: |
+          Write-Host "Baixando Python $env:PYTHON_VERSION..."
+          Invoke-WebRequest -Uri $env:EMBED_URL -OutFile "python-embed.zip"
+          Expand-Archive -Path "python-embed.zip" -DestinationPath "$env:PORTABLE_DIR" -Force
+        shell: pwsh
+
+      - name: Instalar e configurar o pip
+        run: |
+          Write-Host "Baixando get-pip.py..."
+          Invoke-WebRequest -Uri $env:GET_PIP_URL -OutFile "get-pip.py"
+          
+          # O executável do python no embeddable é apenas "python.exe"
+          $pythonExe = "$env:PORTABLE_DIR\python.exe"
+          
+          Write-Host "Instalando pip no ambiente portátil..."
+          & $pythonExe get-pip.py
+          
+          Write-Host "Limpando o instalador do pip..."
+          Remove-Item "get-pip.py" -Force
+          Remove-Item "python-embed.zip" -Force
+        shell: pwsh
+
+      - name: Habilitar site-packages (essencial para o pip funcionar)
+        run: |
+          # O arquivo _pth controla a inicialização. Precisamos renomeá-lo e habilitar a importação de 'site'
+          $pthFile = Get-ChildItem -Path "$env:PORTABLE_DIR" -Filter "python*._pth" | Select-Object -First 1
+          $newPthName = $pthFile.Name -replace '\._pth$', '.pth'
+          
+          Write-Host "Renomeando $($pthFile.Name) para $newPthName e habilitando 'import site'..."
+          
+          # Lê o conteúdo, remove o comentário da linha 'import site' e salva no novo arquivo
+          $content = Get-Content $pthFile.FullName
+          $content = $content -replace '#import site', 'import site'
+          $content | Set-Content -Path "$env:PORTABLE_DIR\$newPthName"
+          
+          Remove-Item $pthFile.FullName -Force
+        shell: pwsh
+
+      - name: (Opcional) Instalar pacotes adicionais
+        # Descomente e ajuste esta etapa se precisar de pacotes pré-instalados
+        # run: |
+        #   & "$env:PORTABLE_DIR\python.exe" -m pip install --upgrade pip
+        #   & "$env:PORTABLE_DIR\python.exe" -m pip install requests numpy pandas
+        # shell: pwsh
+
+      - name: Compactar o pacote final
+        run: |
+          Write-Host "Compactando o ambiente portátil..."
+          Compress-Archive -Path "$env:PORTABLE_DIR\*" -DestinationPath "python-$env:PYTHON_VERSION-portable.zip" -Force
+        shell: pwsh
+
+      - name: Fazer upload do artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-portable-windows
+          path: python-*-portable.zip
