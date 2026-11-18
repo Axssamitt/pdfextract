@@ -2,61 +2,49 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
-import time
 import argparse
 import importlib.util
+import re
+import csv
 
 # ----------------------------------------------------------------------
-# Verificação de dependências ANTES dos imports pesados
+# Verificação de dependências
 # ----------------------------------------------------------------------
-DEPENDENCIAS = {
-    "tkinter":    "Interface gráfica (Tcl/Tk)",
-    "pdfplumber": "Leitura de PDF",
-    "PIL":        "Renderização de imagem (Pillow)",
-}
-
 def verificar_dependencias():
     faltando = []
-    for modulo, descricao in DEPENDENCIAS.items():
-        if importlib.util.find_spec(modulo) is None:
-            faltando.append((modulo, descricao))
+    if importlib.util.find_spec("PyQt6") is None: faltando.append("PyQt6 (Interface gráfica)")
+    if importlib.util.find_spec("pdfplumber") is None: faltando.append("pdfplumber (Leitura de PDF)")
+    if importlib.util.find_spec("PIL") is None: faltando.append("Pillow (Renderização de imagem)")
+
     if not faltando:
         return True
+    
     print("\n[ERRO] Dependências ausentes:\n")
-    for modulo, descricao in faltando:
-        print(f"  • {modulo} — {descricao}")
-    print("\nComo resolver:")
-    print("  pip install pdfplumber pillow")
-    print("  Para tkinter no Windows: reinstale o Python marcando 'tcl/tk and IDLE'.")
-    print("  Para tkinter no Linux:   sudo apt install python3-tk")
+    for dep in faltando:
+        print(f"  • {dep}")
+    print("\nComo resolver:\n  pip install PyQt6 pdfplumber pillow openpyxl")
     return False
 
 def verificar_openpyxl():
     if importlib.util.find_spec("openpyxl") is None:
         print("\n[ERRO] openpyxl não encontrado — necessário para exportar XLSX.")
-        print("  pip install openpyxl")
         return False
     return True
 
 if not verificar_dependencias():
     sys.exit(1)
 
-import tkinter as tk
-from tkinter import messagebox, filedialog, ttk
+from PyQt6.QtWidgets import (QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout, 
+                             QLabel, QLineEdit, QPushButton, QRadioButton, QButtonGroup,
+                             QCheckBox, QFileDialog, QMessageBox, QScrollArea, QListWidget)
+from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QBrush, QFont, QImage, QGuiApplication
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize
 import pdfplumber
-from PIL import Image, ImageTk
-import re
-import csv
+from PIL import Image
 
 # ----------------------------------------------------------------------
-# Utilidades
+# Utilidades de Dados e Regex
 # ----------------------------------------------------------------------
-def safe_print(*args, **kwargs):
-    try:
-        print(*args, **kwargs)
-    except Exception:
-        pass
-
 def _corpo_mascara(mascara):
     regex = re.escape(mascara)
     regex = re.sub(r'[dD]{2}', r'\d{2}', regex)
@@ -69,37 +57,26 @@ def _corpo_mascara(mascara):
 
 def converter_mascaras_para_regex(mascaras_str):
     partes = [m.strip() for m in re.split(r'[,;]', mascaras_str) if m.strip()]
-    if not partes:
-        return None
-    if len(partes) == 1:
-        return re.compile(r'^' + _corpo_mascara(partes[0]))
+    if not partes: return None
+    if len(partes) == 1: return re.compile(r'^' + _corpo_mascara(partes[0]))
     corpos = [_corpo_mascara(m) for m in partes]
     return re.compile(r'^(?:' + '|'.join(corpos) + ')')
 
 REGEX_DATA_AUTO = re.compile(
-    r'^(?:'
-    r'\d{1,2}[/.\-]\d{1,2}(?:[/.\-]\d{2,4})?'
-    r'|\d{1,2}\s+(?:seg|ter|qua|qui|sex|s[áa]b|dom)\b'
-    r'|\d{1,2}\s+de\s+\S+'
-    r'|\d{1,2}\s*[-–—]'
-    r'|\d{1,2}(?=\s|$)'
-    r')',
+    r'^(?:\d{1,2}[/.\-]\d{1,2}(?:[/.\-]\d{2,4})?|\d{1,2}\s+(?:seg|ter|qua|qui|sex|s[áa]b|dom)\b|\d{1,2}\s+de\s+\S+|\d{1,2}\s*[-–—]|\d{1,2}(?=\s|$))',
     re.IGNORECASE | re.UNICODE
 )
 
 def parse_paginas(pag_str):
-    pag_inicio = 1
-    pag_fim = 999999
+    pag_inicio, pag_fim = 1, 999999
     pag_str = (pag_str or "").strip()
     if pag_str and pag_str.lower() != "1-end":
         if "-" in pag_str:
             partes = pag_str.split("-")
             pag_inicio = int(partes[0])
-            if partes[1].lower() != "end" and partes[1] != "":
-                pag_fim = int(partes[1])
+            if partes[1].lower() != "end" and partes[1] != "": pag_fim = int(partes[1])
         else:
-            pag_inicio = int(pag_str)
-            pag_fim = int(pag_str)
+            pag_inicio = pag_fim = int(pag_str)
     return pag_inicio, pag_fim
 
 def inferir_formato(caminho):
@@ -107,805 +84,559 @@ def inferir_formato(caminho):
 
 def garantir_extensao(caminho, formato):
     ext = ".xlsx" if formato == "xlsx" else ".csv"
-    caminho_lower = caminho.lower()
-    if caminho_lower.endswith(ext):
-        return caminho
+    if caminho.lower().endswith(ext): return caminho
     for outra in (".csv", ".xlsx"):
-        if caminho_lower.endswith(outra):
-            caminho = caminho[:-len(outra)]
-            break
+        if caminho.lower().endswith(outra): caminho = caminho[:-len(outra)]
     return caminho + ext
 
 # ----------------------------------------------------------------------
-# Seletor de arquivo customizado (ordenação cronológica)
+# Janela de Configuração Inicial
 # ----------------------------------------------------------------------
-class FilePickerDialog(tk.Toplevel):
-    def __init__(self, parent, title="Selecionar arquivo",
-                 initialdir=None, filetypes=None,
-                 sort_by="date", descending=True):
-        super().__init__(parent)
-        self.title(title)
-        self.geometry("880x560")
-        self.minsize(720, 420)
-        self.transient(parent)
-        self.grab_set()
-
-        self.filetypes = filetypes or [("Todos os arquivos", "*")]
-        self.selected_path = None
-        self.sort_by = sort_by
-        self.descending = descending
-        self.current_dir = os.path.abspath(initialdir or os.path.expanduser("~"))
-
-        top = tk.Frame(self)
-        top.pack(fill=tk.X, padx=8, pady=6)
-        tk.Button(top, text="↑ Subir", command=self.go_up, width=9).pack(side=tk.LEFT)
-        self.lbl_path = tk.Label(top, text="", anchor="w", fg="#333", bg="#f0f0f0", relief=tk.SUNKEN)
-        self.lbl_path.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
-
-        filtro_frame = tk.Frame(self)
-        filtro_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
-        tk.Label(filtro_frame, text="Filtrar por nome:").pack(side=tk.LEFT)
-        self.entry_filtro = tk.Entry(filtro_frame, width=30)
-        self.entry_filtro.pack(side=tk.LEFT, padx=6)
-        self.entry_filtro.bind("<KeyRelease>", lambda e: self.refresh())
-
-        tree_frame = tk.Frame(self)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8)
-        cols = ("name", "modified", "size")
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
-        self.tree.heading("name", text="Nome", command=lambda: self.set_sort("name"))
-        self.tree.heading("modified", text="Modificado", command=lambda: self.set_sort("date"))
-        self.tree.heading("size", text="Tamanho", command=lambda: self.set_sort("size"))
-        self.tree.column("name", width=460, anchor="w")
-        self.tree.column("modified", width=170, anchor="center")
-        self.tree.column("size", width=110, anchor="e")
-        yscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=yscroll.set)
-        yscroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.tree.bind("<Double-1>", self.on_double_click)
-        self.tree.bind("<Return>", lambda e: self.confirm())
-
-        bot = tk.Frame(self)
-        bot.pack(fill=tk.X, padx=8, pady=10)
-        tk.Button(bot, text="Cancelar", command=self.cancel, width=14).pack(side=tk.RIGHT, padx=4)
-        tk.Button(bot, text="Abrir", command=self.confirm, width=14, bg="#2e7d32", fg="white", font=("Arial", 10, "bold")).pack(side=tk.RIGHT, padx=4)
-
-        self.refresh()
-        self.wait_window()
-
-    def extensions_match(self, filename):
-        for _, pattern in self.filetypes:
-            if pattern in ("*", "*.*"):
-                return True
-            for ext in pattern.split(";"):
-                ext = ext.strip()
-                if ext.startswith("*.") and filename.lower().endswith(ext[1:].lower()):
-                    return True
-        return False
-
-    def set_sort(self, key):
-        if self.sort_by == key:
-            self.descending = not self.descending
-        else:
-            self.sort_by = key
-            self.descending = (key != "name")
-        self.refresh()
-
-    def refresh(self):
-        self.lbl_path.config(text=self.current_dir)
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
-        try:
-            entries = list(os.scandir(self.current_dir))
-        except PermissionError:
-            messagebox.showerror("Erro", "Sem permissão para acessar esta pasta.")
-            return
-
-        filtro = self.entry_filtro.get().strip().lower() if hasattr(self, "entry_filtro") else ""
-        dirs, files = [], []
-        for e in entries:
-            try:
-                if e.name.startswith("."): continue
-                if filtro and filtro not in e.name.lower(): continue
-                if e.is_dir():
-                    dirs.append((e.name, e.stat().st_mtime, 0))
-                elif e.is_file() and self.extensions_match(e.name):
-                    st = e.stat()
-                    files.append((e.name, st.st_mtime, st.st_size))
-            except OSError:
-                continue
-
-        def key(item):
-            name, mtime, size = item
-            if self.sort_by == "name": return name.lower()
-            if self.sort_by == "size": return size
-            return mtime
-
-        dirs.sort(key=key, reverse=self.descending)
-        files.sort(key=key, reverse=self.descending)
-        for name, _, _ in dirs:
-            self.tree.insert("", "end", values=("📁 " + name, "", ""))
-        for name, mtime, size in files:
-            mtime_str = time.strftime("%d/%m/%Y %H:%M", time.localtime(mtime))
-            self.tree.insert("", "end", values=(name, mtime_str, self._fmt_size(size)))
-
-        arrow = " ▼" if self.descending else " ▲"
-        self.tree.heading("name", text="Nome" + (arrow if self.sort_by == "name" else ""))
-        self.tree.heading("modified", text="Modificado" + (arrow if self.sort_by == "date" else ""))
-        self.tree.heading("size", text="Tamanho" + (arrow if self.sort_by == "size" else ""))
-
-    @staticmethod
-    def _fmt_size(n):
-        for unit in ("B", "KB", "MB", "GB"):
-            if n < 1024: return f"{n:.1f} {unit}"
-            n /= 1024
-        return f"{n:.1f} TB"
-
-    def go_up(self):
-        parent = os.path.dirname(self.current_dir)
-        if parent and parent != self.current_dir:
-            self.current_dir = parent
-            self.refresh()
-
-    def on_double_click(self, event):
-        sel = self.tree.selection()
-        if not sel: return
-        name = self.tree.item(sel[0], "values")[0]
-        if name.startswith("📁 "):
-            self.current_dir = os.path.join(self.current_dir, name[2:])
-            self.refresh()
-        else:
-            self.confirm()
-
-    def confirm(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showwarning("Aviso", "Selecione um arquivo.")
-            return
-        name = self.tree.item(sel[0], "values")[0]
-        if name.startswith("📁 "):
-            self.current_dir = os.path.join(self.current_dir, name[2:])
-            self.refresh()
-            return
-        self.selected_path = os.path.join(self.current_dir, name)
-        self.destroy()
-
-    def cancel(self):
-        self.selected_path = None
-        self.destroy()
-
-# ----------------------------------------------------------------------
-# NOVO: Janela para ordenar as colunas
-# ----------------------------------------------------------------------
-class ColumnOrderDialog(tk.Toplevel):
-    def __init__(self, parent, nomes_colunas):
-        super().__init__(parent)
-        self.title("Definir Ordem das Colunas")
-        self.geometry("380x420")
-        self.minsize(380, 420)
-        self.transient(parent)
-        self.grab_set()
+class ConfigDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Extrator PDF → CSV/XLSX - Configuração")
+        self.setFixedSize(500, 400)
         self.resultado = None
+        self.initUI()
 
-        tk.Label(self, text="Defina a ordem de saída (a primeira da lista\nserá a coluna 1 do arquivo):",
-                 fg="blue", font=("Arial", 10, "bold")).pack(pady=10)
+    def initUI(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Configure a extração antes de escolher as colunas:</b>"))
 
-        frame_lista = tk.Frame(self)
-        frame_lista.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+        h_pdf = QHBoxLayout()
+        h_pdf.addWidget(QLabel("Arquivo PDF:"))
+        self.txt_pdf = QLineEdit()
+        h_pdf.addWidget(self.txt_pdf)
+        btn_pdf = QPushButton("Procurar...")
+        btn_pdf.clicked.connect(self.escolher_pdf)
+        h_pdf.addWidget(btn_pdf)
+        layout.addLayout(h_pdf)
 
-        self.listbox = tk.Listbox(frame_lista, selectmode=tk.SINGLE, exportselection=False, font=("Arial", 11))
-        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        h_out = QHBoxLayout()
+        h_out.addWidget(QLabel("Arquivo de saída:"))
+        self.txt_out = QLineEdit()
+        h_out.addWidget(self.txt_out)
+        btn_out = QPushButton("Salvar como...")
+        btn_out.clicked.connect(self.escolher_saida)
+        h_out.addWidget(btn_out)
+        layout.addLayout(h_out)
 
-        scroll = tk.Scrollbar(frame_lista, orient=tk.VERTICAL, command=self.listbox.yview)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.listbox.config(yscrollcommand=scroll.set)
+        h_fmt = QHBoxLayout()
+        h_fmt.addWidget(QLabel("Formato de saída:"))
+        self.rb_csv = QRadioButton("CSV (separado por ;)")
+        self.rb_xlsx = QRadioButton("XLSX (Excel)")
+        self.rb_csv.setChecked(True)
+        self.rb_csv.toggled.connect(self.on_formato_change)
+        h_fmt.addWidget(self.rb_csv)
+        h_fmt.addWidget(self.rb_xlsx)
+        h_fmt.addStretch()
+        layout.addLayout(h_fmt)
 
-        self.indices = list(range(len(nomes_colunas)))
-        for nome in nomes_colunas:
-            self.listbox.insert(tk.END, nome)
+        h_pag = QHBoxLayout()
+        h_pag.addWidget(QLabel("Intervalo de páginas:"))
+        self.txt_pag = QLineEdit("1-end")
+        self.txt_pag.setFixedWidth(100)
+        h_pag.addWidget(self.txt_pag)
+        h_pag.addWidget(QLabel("Ex.: 1-end, 5-30 ou 7"))
+        h_pag.addStretch()
+        layout.addLayout(h_pag)
 
-        frame_botoes = tk.Frame(self)
-        frame_botoes.pack(fill=tk.X, padx=15, pady=15)
+        self.chk_filtro = QCheckBox("Filtrar linhas por data")
+        self.chk_filtro.toggled.connect(self.toggle_filtro)
+        layout.addWidget(self.chk_filtro)
 
-        tk.Button(frame_botoes, text="↑ Subir", command=self.subir, width=10, font=("Arial", 10)).pack(side=tk.LEFT, padx=2)
-        tk.Button(frame_botoes, text="↓ Descer", command=self.descer, width=10, font=("Arial", 10)).pack(side=tk.LEFT, padx=2)
-        tk.Button(frame_botoes, text="✔ Confirmar", command=self.confirmar, bg="#2e7d32", fg="white", width=12, font=("Arial", 10, "bold")).pack(side=tk.RIGHT, padx=2)
-        tk.Button(frame_botoes, text="✖ Cancelar", command=self.destroy, width=10, font=("Arial", 10)).pack(side=tk.RIGHT, padx=2)
+        h_data = QHBoxLayout()
+        h_data.addWidget(QLabel("Formato(s) da data:"))
+        self.txt_data = QLineEdit("dd/mm/aaaa")
+        self.txt_data.setEnabled(False)
+        h_data.addWidget(self.txt_data)
+        layout.addLayout(h_data)
 
-        self.wait_window()
+        self.chk_auto = QCheckBox("Detecção automática (01, 01 qua, 01/01/2010…)")
+        self.chk_auto.setEnabled(False)
+        self.chk_auto.toggled.connect(self.toggle_filtro)
+        layout.addWidget(self.chk_auto)
 
-    def subir(self):
-        sel = self.listbox.curselection()
-        if not sel or sel[0] == 0: return
-        idx = sel[0]
-        texto = self.listbox.get(idx)
-        indice_orig = self.indices.pop(idx)
-        self.listbox.delete(idx)
-        self.listbox.insert(idx - 1, texto)
-        self.indices.insert(idx - 1, indice_orig)
-        self.listbox.selection_set(idx - 1)
+        layout.addStretch()
 
-    def descer(self):
-        sel = self.listbox.curselection()
-        if not sel or sel[0] == self.listbox.size() - 1: return
-        idx = sel[0]
-        texto = self.listbox.get(idx)
-        indice_orig = self.indices.pop(idx)
-        self.listbox.delete(idx)
-        self.listbox.insert(idx + 1, texto)
-        self.indices.insert(idx + 1, indice_orig)
-        self.listbox.selection_set(idx + 1)
-
-    def confirmar(self):
-        self.resultado = self.indices
-        self.destroy()
-
-# ----------------------------------------------------------------------
-# Janela de configuração inicial
-# ----------------------------------------------------------------------
-class ConfigWindow:
-    def __init__(self, root):
-        self.root = root
-        self.resultado = None
-
-        self.root.title("Extrator PDF → CSV/XLSX - Configuração")
-        self.root.geometry("920x430")
-        self.root.resizable(False, False)
-
-        tk.Label(root, text="Configure a extração antes de escolher as colunas:", font=("Arial", 12, "bold"), fg="#333").grid(row=0, column=0, columnspan=3, padx=10, pady=(15, 10), sticky="w")
-
-        tk.Label(root, text="Arquivo PDF:").grid(row=1, column=0, sticky="w", padx=10, pady=5)
-        self.entry_pdf = tk.Entry(root, width=60)
-        self.entry_pdf.grid(row=1, column=1, padx=5, pady=5, sticky="we")
-        tk.Button(root, text="Procurar...", command=self.escolher_pdf, width=12).grid(row=1, column=2, padx=5, pady=5)
-
-        tk.Label(root, text="Arquivo de saída:").grid(row=2, column=0, sticky="w", padx=10, pady=5)
-        self.entry_csv = tk.Entry(root, width=60)
-        self.entry_csv.grid(row=2, column=1, padx=5, pady=5, sticky="we")
-        tk.Button(root, text="Salvar como...", command=self.escolher_csv, width=12).grid(row=2, column=2, padx=5, pady=5)
-
-        tk.Label(root, text="Formato de saída:").grid(row=3, column=0, sticky="w", padx=10, pady=5)
-        frame_formato = tk.Frame(root)
-        frame_formato.grid(row=3, column=1, columnspan=2, sticky="w", padx=5, pady=5)
-        self.var_formato = tk.StringVar(value="csv")
-        tk.Radiobutton(frame_formato, text="CSV  (separado por ;)", variable=self.var_formato, value="csv", command=self.on_formato_change, font=("Arial", 10)).pack(side=tk.LEFT)
-        tk.Radiobutton(frame_formato, text="XLSX  (Excel)", variable=self.var_formato, value="xlsx", command=self.on_formato_change, font=("Arial", 10)).pack(side=tk.LEFT, padx=(20, 0))
-
-        tk.Label(root, text="Intervalo de páginas:").grid(row=4, column=0, sticky="w", padx=10, pady=5)
-        frame_pag = tk.Frame(root)
-        frame_pag.grid(row=4, column=1, sticky="w", padx=5, pady=5)
-        self.entry_paginas = tk.Entry(frame_pag, width=20)
-        self.entry_paginas.insert(0, "1-end")
-        self.entry_paginas.pack(side=tk.LEFT)
-        tk.Label(frame_pag, text="  Ex.: 1-end, 5-30 ou 7", fg="#555").pack(side=tk.LEFT)
-
-        self.var_filtro = tk.BooleanVar(value=False)
-        self.var_auto_data = tk.BooleanVar(value=False)
-
-        chk_filtro = tk.Checkbutton(root, text="Filtrar linhas por data", variable=self.var_filtro, command=self.toggle_filtro)
-        chk_filtro.grid(row=5, column=0, sticky="w", padx=10, pady=5)
-
-        self.chk_auto = tk.Checkbutton(root, text="Detecção automática (01, 01 qua, 01/01/2010…)", variable=self.var_auto_data, command=self.toggle_filtro, state="disabled")
-        self.chk_auto.grid(row=5, column=1, columnspan=2, sticky="w", padx=5, pady=5)
-
-        tk.Label(root, text="Formato(s) da data:").grid(row=6, column=0, sticky="w", padx=10, pady=5)
-        self.entry_data = tk.Entry(root, width=48, state="disabled")
-        self.entry_data.insert(0, "dd/mm/aaaa")
-        self.entry_data.grid(row=6, column=1, padx=5, pady=5, sticky="we")
-
-        self.lbl_dica_data = tk.Label(root, text="", fg="#666", font=("Arial", 8), anchor="w")
-        self.lbl_dica_data.grid(row=6, column=2, sticky="w", padx=5, pady=5)
-
-        frame_botoes = tk.Frame(root)
-        frame_botoes.grid(row=7, column=0, columnspan=3, pady=25)
-        tk.Button(frame_botoes, text="Iniciar", command=self.iniciar, bg="#2e7d32", fg="white", width=16, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=10)
-        tk.Button(frame_botoes, text="Cancelar", command=self.cancelar, width=16, font=("Arial", 10)).pack(side=tk.LEFT, padx=10)
+        h_btn = QHBoxLayout()
+        btn_ok = QPushButton("Iniciar")
+        btn_ok.clicked.connect(self.iniciar)
+        btn_ok.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 5px 20px;")
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        h_btn.addStretch()
+        h_btn.addWidget(btn_cancel)
+        h_btn.addWidget(btn_ok)
+        layout.addLayout(h_btn)
 
     def toggle_filtro(self):
-        if self.var_filtro.get():
-            self.chk_auto.config(state="normal")
-            if self.var_auto_data.get():
-                self.entry_data.config(state="disabled")
-                self.lbl_dica_data.config(text="automático")
-            else:
-                self.entry_data.config(state="normal")
-                self.lbl_dica_data.config(text="aceita várias máscaras:\ndd/mm/aaaa, dd mmm, dd")
+        ativo = self.chk_filtro.isChecked()
+        self.chk_auto.setEnabled(ativo)
+        if ativo:
+            self.txt_data.setEnabled(not self.chk_auto.isChecked())
         else:
-            self.chk_auto.config(state="disabled")
-            self.var_auto_data.set(False)
-            self.entry_data.config(state="disabled")
-            self.lbl_dica_data.config(text="")
+            self.txt_data.setEnabled(False)
 
     def on_formato_change(self):
-        caminho = self.entry_csv.get().strip()
+        caminho = self.txt_out.text().strip()
         if caminho:
-            novo = garantir_extensao(caminho, self.var_formato.get())
-            if novo != caminho:
-                self.entry_csv.delete(0, tk.END)
-                self.entry_csv.insert(0, novo)
+            fmt = "xlsx" if self.rb_xlsx.isChecked() else "csv"
+            self.txt_out.setText(garantir_extensao(caminho, fmt))
 
     def escolher_pdf(self):
-        initial = None
-        atual = self.entry_pdf.get().strip()
-        if atual and os.path.isdir(os.path.dirname(atual)):
-            initial = os.path.dirname(atual)
-        elif os.path.isdir(os.path.expanduser("~/Downloads")):
-            initial = os.path.expanduser("~/Downloads")
-
-        dlg = FilePickerDialog(self.root, title="Selecione o PDF", initialdir=initial, filetypes=[("Arquivos PDF", "*.pdf"), ("Todos os arquivos", "*.*")], sort_by="date", descending=True)
-        if dlg.selected_path:
-            self.entry_pdf.delete(0, tk.END)
-            self.entry_pdf.insert(0, dlg.selected_path)
-            if not self.entry_csv.get().strip():
-                base, _ = os.path.splitext(dlg.selected_path)
-                ext = ".xlsx" if self.var_formato.get() == "xlsx" else ".csv"
-                self.entry_csv.insert(0, base + ext)
-
-    def escolher_csv(self):
-        formato = self.var_formato.get()
-        if formato == "xlsx":
-            tipos = [("Planilha Excel", "*.xlsx"), ("Todos os arquivos", "*.*")]
-            ext = ".xlsx"
-        else:
-            tipos = [("Arquivos CSV", "*.csv"), ("Todos os arquivos", "*.*")]
-            ext = ".csv"
-        caminho = filedialog.asksaveasfilename(title=f"Salvar {formato.upper()} como...", defaultextension=ext, filetypes=tipos)
+        caminho, _ = QFileDialog.getOpenFileName(self, "Selecione o PDF", "", "Arquivos PDF (*.pdf);;Todos os arquivos (*)")
         if caminho:
-            self.entry_csv.delete(0, tk.END)
-            self.entry_csv.insert(0, garantir_extensao(caminho, formato))
+            self.txt_pdf.setText(caminho)
+            if not self.txt_out.text():
+                base, _ = os.path.splitext(caminho)
+                ext = ".xlsx" if self.rb_xlsx.isChecked() else ".csv"
+                self.txt_out.setText(base + ext)
+
+    def escolher_saida(self):
+        fmt = "xlsx" if self.rb_xlsx.isChecked() else "csv"
+        filtro = "Planilha Excel (*.xlsx)" if fmt == "xlsx" else "Arquivos CSV (*.csv)"
+        caminho, _ = QFileDialog.getSaveFileName(self, f"Salvar {fmt.upper()} como...", "", filtro)
+        if caminho:
+            self.txt_out.setText(garantir_extensao(caminho, fmt))
 
     def iniciar(self):
-        pdf = self.entry_pdf.get().strip()
-        csv_path = self.entry_csv.get().strip()
-        pag_str = self.entry_paginas.get().strip()
-        formato = self.var_formato.get()
+        pdf = self.txt_pdf.text().strip()
+        out = self.txt_out.text().strip()
+        pag = self.txt_pag.text().strip()
+        fmt = "xlsx" if self.rb_xlsx.isChecked() else "csv"
 
-        if not pdf:
-            messagebox.showerror("Erro", "Selecione o arquivo PDF.")
+        if not pdf or not os.path.exists(pdf):
+            QMessageBox.critical(self, "Erro", "Selecione um arquivo PDF válido.")
             return
-        if not os.path.exists(pdf):
-            messagebox.showerror("Erro", f"Arquivo PDF não encontrado:\n{pdf}")
+        if not out:
+            QMessageBox.critical(self, "Erro", "Informe o arquivo de saída.")
             return
-        if not csv_path:
-            messagebox.showerror("Erro", "Indique o nome do arquivo de saída.")
-            return
-
-        csv_path = garantir_extensao(csv_path, formato)
-        self.entry_csv.delete(0, tk.END)
-        self.entry_csv.insert(0, csv_path)
-
-        if formato == "xlsx" and importlib.util.find_spec("openpyxl") is None:
-            messagebox.showerror("openpyxl ausente", "Para exportar em XLSX é necessário instalar o openpyxl:\n\n    pip install openpyxl\n\nOu troque o formato para CSV.")
+        if fmt == "xlsx" and not verificar_openpyxl():
+            QMessageBox.critical(self, "Erro", "Instale o openpyxl para exportar XLSX:\n\npip install openpyxl")
             return
 
         try:
-            pag_inicio, pag_fim = parse_paginas(pag_str)
-            if pag_inicio < 1 or pag_fim < pag_inicio:
-                raise ValueError
+            p_ini, p_fim = parse_paginas(pag)
         except ValueError:
-            messagebox.showerror("Erro", "Intervalo de páginas inválido.\nUse o formato: 1-end, 5-30 ou 7.")
+            QMessageBox.critical(self, "Erro", "Intervalo de páginas inválido.")
             return
 
         regex_data = None
-        if self.var_filtro.get():
-            if self.var_auto_data.get():
+        if self.chk_filtro.isChecked():
+            if self.chk_auto.isChecked():
                 regex_data = REGEX_DATA_AUTO
             else:
-                formato_data = self.entry_data.get().strip()
-                if not formato_data:
-                    messagebox.showerror("Erro", "Informe o formato da data (ex.: dd/mm/aaaa).")
-                    return
-                try:
-                    regex_data = converter_mascaras_para_regex(formato_data)
-                except Exception as e:
-                    messagebox.showerror("Erro", f"Formato de data inválido: {e}")
-                    return
-                if regex_data is None:
-                    messagebox.showerror("Erro", "Nenhuma máscara de data válida informada.")
+                mascaras = self.txt_data.text().strip()
+                regex_data = converter_mascaras_para_regex(mascaras)
+                if not regex_data:
+                    QMessageBox.critical(self, "Erro", "Máscara de data inválida.")
                     return
 
-        self.resultado = (pdf, csv_path, pag_inicio, pag_fim, regex_data, formato)
-        self.root.quit()
-        self.root.destroy()
+        self.resultado = (pdf, out, p_ini, p_fim, regex_data, fmt)
+        self.accept()
 
-    def cancelar(self):
+# ----------------------------------------------------------------------
+# Janela de Ordenação de Colunas
+# ----------------------------------------------------------------------
+class ColumnOrderDialog(QDialog):
+    def __init__(self, nomes):
+        super().__init__()
+        self.setWindowTitle("Definir Ordem das Colunas")
+        self.setFixedSize(300, 400)
         self.resultado = None
-        self.root.quit()
-        self.root.destroy()
+        
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("A primeira da lista será a Coluna 1:"))
+
+        self.lista = QListWidget()
+        for nome in nomes:
+            self.lista.addItem(nome)
+        layout.addWidget(self.lista)
+
+        h_btn = QHBoxLayout()
+        btn_up = QPushButton("↑ Subir")
+        btn_up.clicked.connect(self.subir)
+        btn_down = QPushButton("↓ Descer")
+        btn_down.clicked.connect(self.descer)
+        h_btn.addWidget(btn_up)
+        h_btn.addWidget(btn_down)
+        layout.addLayout(h_btn)
+
+        h_ok = QHBoxLayout()
+        btn_ok = QPushButton("Confirmar")
+        btn_ok.clicked.connect(self.confirmar)
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        h_ok.addWidget(btn_cancel)
+        h_ok.addWidget(btn_ok)
+        layout.addLayout(h_ok)
+
+    def subir(self):
+        row = self.lista.currentRow()
+        if row > 0:
+            item = self.lista.takeItem(row)
+            self.lista.insertItem(row - 1, item)
+            self.lista.setCurrentRow(row - 1)
+
+    def descer(self):
+        row = self.lista.currentRow()
+        if row < self.lista.count() - 1:
+            item = self.lista.takeItem(row)
+            self.lista.insertItem(row + 1, item)
+            self.lista.setCurrentRow(row + 1)
+
+    def confirmar(self):
+        self.resultado = [self.lista.item(i).text() for i in range(self.lista.count())]
+        self.accept()
 
 # ----------------------------------------------------------------------
-# Seletor visual (colunas + limites Y + exclusões + cabeçalho)
+# Widget do PDF (Canvas do Qt)
 # ----------------------------------------------------------------------
-class PDFColumnSelector:
-    TOLERANCIA_PX = 10
+class PDFCanvas(QWidget):
+    def __init__(self, pixmap, fator_escala, parent=None):
+        super().__init__(parent)
+        self.pixmap = pixmap
+        self.fator_escala = fator_escala
+        self.setFixedSize(pixmap.size())
+        self.setMouseTracking(True)
 
-    def __init__(self, root, pdf_path, pagina_visualizacao):
-        self.root = root
-        self.pdf_path = pdf_path
+        self.linhas_v = [] 
+        self.linhas_h = [] 
+        self.exclusoes = [] 
+        self.cabecalho = None 
 
-        self.limites_colunas = []
-        self.limites_linhas = []
-        self.retangulos_exclusao = []
-        self.regiao_cabecalho = None
-        self.ordem_colunas = None # Guarda a ordem final definida pelo usuário
-
-        self.linhas_canvas = []
-        self.linhas_horizontais = []
-        self.retangulos_canvas = []
-        self.cabecalho_canvas = None
-        self.rotulos_canvas = [] # Textos com os números das colunas
-
-        self.modo = tk.StringVar(value="vertical")
-        self.confirmado = False
+        self.modo = "vertical"
+        self.hover_item = None
+        
         self._drag_inicio = None
-        self._drag_id = None
+        self._drag_atual = None
 
-        self.root.title(f"Seletor de Colunas/Linhas - Página {pagina_visualizacao}")
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self.pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        LARGURA_MAXIMA_TELA = 1200
-        ALTURA_MAXIMA_TELA = 800
-
-        with pdfplumber.open(self.pdf_path) as pdf:
-            idx_pag = max(0, min(pagina_visualizacao - 1, len(pdf.pages) - 1))
-            self.pagina_alvo = pdf.pages[idx_pag]
-            img_plumber = self.pagina_alvo.to_image(resolution=150)
-            self.largura_pdf = self.pagina_alvo.width
-            self.altura_pdf = self.pagina_alvo.height
-
-            img_tmp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd(), "pdf_preview_dinamico.png")
-            try:
-                img_plumber.save(img_tmp_path, format="PNG")
-            except Exception:
-                img_tmp_path = os.path.join(os.getcwd(), "pdf_preview_dinamico.png")
-                img_plumber.save(img_tmp_path, format="PNG")
-
-            img_original = Image.open(img_tmp_path)
-            largura_original, altura_original = img_original.size
-
-            if largura_original > LARGURA_MAXIMA_TELA:
-                proporcao = LARGURA_MAXIMA_TELA / float(largura_original)
-                nova_largura = LARGURA_MAXIMA_TELA
-                nova_altura = int(float(altura_original) * float(proporcao))
-                self.img_redimensionada = img_original.resize((nova_largura, nova_altura), Image.Resampling.LANCZOS)
+        for i, (x_c, x_p) in enumerate(self.linhas_v):
+            if self.modo == "vertical" and self.hover_item == i:
+                painter.setPen(QPen(QColor("orange"), 4))
             else:
-                self.img_redimensionada = img_original
+                painter.setPen(QPen(QColor("red"), 2))
+            painter.drawLine(int(x_c), 0, int(x_c), self.height())
 
-            self.largura_img, self.altura_img = self.img_redimensionada.size
-            self.fator_escala = self.largura_pdf / self.largura_img
+        for i, (y_c, y_p) in enumerate(self.linhas_h):
+            if self.modo == "horizontal" and self.hover_item == i:
+                painter.setPen(QPen(QColor("cyan"), 4))
+            else:
+                painter.setPen(QPen(QColor("blue"), 2))
+            painter.drawLine(0, int(y_c), self.width(), int(y_c))
 
-        # --- Barra de modos ---
-        frame_modos = tk.Frame(root, bg="#d0d0d0", pady=4)
-        frame_modos.pack(side=tk.TOP, fill=tk.X)
-        tk.Label(frame_modos, text="Modo:", font=("Arial", 10, "bold"), bg="#d0d0d0").pack(side=tk.LEFT, padx=(10, 5))
-        
-        tk.Radiobutton(frame_modos, text="│ Coluna (divisória vertical)", variable=self.modo, value="vertical", bg="#d0d0d0", font=("Arial", 10)).pack(side=tk.LEFT, padx=3)
-        tk.Radiobutton(frame_modos, text="─ Limite Y (linha horizontal)", variable=self.modo, value="horizontal", bg="#d0d0d0", font=("Arial", 10)).pack(side=tk.LEFT, padx=3)
-        tk.Radiobutton(frame_modos, text="▭ Exclusão (área ignorada)", variable=self.modo, value="exclusao", bg="#d0d0d0", font=("Arial", 10)).pack(side=tk.LEFT, padx=3)
-        tk.Radiobutton(frame_modos, text="◳ Cabeçalho (Dado Fixo)", variable=self.modo, value="cabecalho", bg="#d0d0d0", font=("Arial", 10, "bold"), fg="#004d00").pack(side=tk.LEFT, padx=3)
+        for i, (rect_c, rect_p) in enumerate(self.exclusoes):
+            if self.modo == "exclusao" and self.hover_item == i:
+                painter.setPen(QPen(QColor("red"), 3))
+                painter.setBrush(QBrush(QColor(255, 0, 0, 50)))
+            else:
+                painter.setPen(QPen(QColor("darkorange"), 2))
+                painter.setBrush(QBrush(QColor(255, 200, 0, 50)))
+            painter.drawRect(rect_c)
 
-        # --- Barra de botões ---
-        frame_botoes = tk.Frame(root, bg="#e0e0e0", pady=6)
-        frame_botoes.pack(side=tk.BOTTOM, fill=tk.X)
-        tk.Button(frame_botoes, text="✔ Iniciar Extração", command=self.iniciar_extracao, bg="#2e7d32", fg="white", font=("Arial", 10, "bold"), width=18).pack(side=tk.RIGHT, padx=8)
-        tk.Button(frame_botoes, text="✖ Cancelar", command=self.cancelar, font=("Arial", 10), width=12).pack(side=tk.RIGHT, padx=4)
-        tk.Button(frame_botoes, text="🗑 Limpar Tudo", command=self.limpar_tudo, font=("Arial", 10), width=14).pack(side=tk.LEFT, padx=8)
-        
-        self.lbl_status = tk.Label(frame_botoes, text="nenhum elemento marcado", fg="#333", bg="#e0e0e0", font=("Arial", 10))
-        self.lbl_status.pack(side=tk.LEFT, padx=8)
+        if self.cabecalho:
+            rect_c, rect_p = self.cabecalho
+            if self.modo == "cabecalho" and self.hover_item == "header":
+                painter.setPen(QPen(QColor("red"), 3))
+                painter.setBrush(QBrush(QColor(0, 255, 0, 80)))
+            else:
+                painter.setPen(QPen(QColor("green"), 2))
+                painter.setBrush(QBrush(QColor(144, 238, 144, 80)))
+            painter.drawRect(rect_c)
 
-        lbl_instrucoes = tk.Label(root, text=("│ Clique = divisória · ─ Clique = limite Y · ▭ Arraste = área ignorada · ◳ Arraste = dado fixo (ex: mês/ano)\n"
-                                              "Passe o mouse sobre um elemento e clique para removê-lo"), fg="blue", font=("Arial", 9, "bold"))
-        lbl_instrucoes.pack(side=tk.BOTTOM, pady=4)
+        if self._drag_inicio and self._drag_atual:
+            rect = QRect(self._drag_inicio, self._drag_atual).normalized()
+            cor = QColor("darkorange") if self.modo == "exclusao" else QColor("green")
+            painter.setPen(QPen(cor, 2, Qt.PenStyle.DashLine))
+            painter.setBrush(QBrush(QColor(cor.red(), cor.green(), cor.blue(), 50)))
+            painter.drawRect(rect)
 
-        # --- Canvas ---
-        frame_principal = tk.Frame(root)
-        frame_principal.pack(side=tk.TOP, expand=True, fill=tk.BOTH)
-        scroll_x = tk.Scrollbar(frame_principal, orient=tk.HORIZONTAL)
-        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-        scroll_y = tk.Scrollbar(frame_principal, orient=tk.VERTICAL)
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        if self.linhas_v:
+            xs = [0] + [x for x, _ in self.linhas_v] + [self.width()]
+            painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            for i in range(len(xs) - 1):
+                centro = (xs[i] + xs[i+1]) // 2
+                painter.setPen(QPen(QColor("black"), 1))
+                painter.setBrush(QBrush(QColor("white")))
+                painter.drawRect(centro - 12, 5, 24, 20)
+                painter.setPen(QPen(QColor("blue"), 1))
+                painter.drawText(QRect(centro - 12, 5, 24, 20), Qt.AlignmentFlag.AlignCenter, str(i+1))
 
-        largura_janela = min(self.largura_img, LARGURA_MAXIMA_TELA)
-        altura_janela = min(self.altura_img, ALTURA_MAXIMA_TELA)
+    def mousePressEvent(self, event):
+        pos = event.pos()
+        x, y = pos.x(), pos.y()
 
-        self.canvas = tk.Canvas(frame_principal, width=largura_janela, height=altura_janela, xscrollcommand=scroll_x.set, yscrollcommand=scroll_y.set)
-        self.canvas.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
-        scroll_x.config(command=self.canvas.xview)
-        scroll_y.config(command=self.canvas.yview)
-        self.canvas.config(scrollregion=(0, 0, self.largura_img, self.altura_img))
-
-        self.tk_img = ImageTk.PhotoImage(self.img_redimensionada)
-        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_img)
-
-        self.canvas.bind("<Button-1>", self.on_press)
-        self.canvas.bind("<B1-Motion>", self.on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.on_release)
-        self.canvas.bind("<Motion>", self.ao_mover_mouse)
-
-        self.root.protocol("WM_DELETE_WINDOW", self.fechar_pela_janela)
-
-    def atualizar_rotulos_colunas(self):
-        """Desenha os números (1, 2, 3...) no topo de cada coluna delimitada."""
-        for rot_id in self.rotulos_canvas:
-            self.canvas.delete(rot_id)
-        self.rotulos_canvas.clear()
-
-        xs = [0] + [x for _, x in self.linhas_canvas] + [self.largura_img]
-        for i in range(len(xs) - 1):
-            centro_x = (xs[i] + xs[i+1]) / 2
-            # Desenha um pequeno fundo branco para destacar o número sobre a imagem
-            bg_id = self.canvas.create_rectangle(centro_x - 12, 5, centro_x + 12, 25, fill="white", outline="black")
-            txt_id = self.canvas.create_text(centro_x, 15, text=str(i+1), font=("Arial", 11, "bold"), fill="blue")
-            self.rotulos_canvas.extend([bg_id, txt_id])
-
-    def ao_mover_mouse(self, event):
-        x = self.canvas.canvasx(event.x)
-        y = self.canvas.canvasy(event.y)
-        modo = self.modo.get()
-        sobre = False
-
-        for line_id, _ in self.linhas_canvas: self.canvas.itemconfig(line_id, fill="red", width=2)
-        for line_id, _ in self.linhas_horizontais: self.canvas.itemconfig(line_id, fill="blue", width=2)
-        for rect_id, _, _, _, _ in self.retangulos_canvas: self.canvas.itemconfig(rect_id, outline="darkorange", width=2)
-        if self.cabecalho_canvas: self.canvas.itemconfig(self.cabecalho_canvas, outline="green", width=2)
-
-        if modo == "vertical":
-            for line_id, x_canvas in self.linhas_canvas:
-                if abs(x_canvas - x) < self.TOLERANCIA_PX:
-                    self.canvas.itemconfig(line_id, fill="orange", width=4)
-                    sobre = True
-        elif modo == "horizontal":
-            for line_id, y_canvas in self.linhas_horizontais:
-                if abs(y_canvas - y) < self.TOLERANCIA_PX:
-                    self.canvas.itemconfig(line_id, fill="cyan", width=4)
-                    sobre = True
-        elif modo == "exclusao":
-            for rect_id, rx0, ry0, rx1, ry1 in self.retangulos_canvas:
-                if rx0 <= x <= rx1 and ry0 <= y <= ry1:
-                    self.canvas.itemconfig(rect_id, outline="red", width=3)
-                    sobre = True
-        elif modo == "cabecalho" and self.cabecalho_canvas:
-            cx0, cy0, cx1, cy1 = self.canvas.coords(self.cabecalho_canvas)
-            if cx0 <= x <= cx1 and cy0 <= y <= cy1:
-                self.canvas.itemconfig(self.cabecalho_canvas, outline="red", width=3)
-                sobre = True
-
-        if modo in ("vertical", "horizontal"):
-            self.canvas.config(cursor="crosshair")
-        elif sobre:
-            self.canvas.config(cursor="hand2")
-        else:
-            self.canvas.config(cursor="")
-
-    def on_press(self, event):
-        x = self.canvas.canvasx(event.x)
-        y = self.canvas.canvasy(event.y)
-        modo = self.modo.get()
-
-        if modo == "vertical":
+        if self.modo == "vertical":
             self._toggle_vertical(x)
-        elif modo == "horizontal":
+        elif self.modo == "horizontal":
             self._toggle_horizontal(y)
-        elif modo == "exclusao":
-            for i, (rect_id, rx0, ry0, rx1, ry1) in enumerate(self.retangulos_canvas):
-                if rx0 <= x <= rx1 and ry0 <= y <= ry1:
-                    self.canvas.delete(rect_id)
-                    self.retangulos_canvas.pop(i)
-                    self.retangulos_exclusao.pop(i)
-                    self.atualizar_status()
-                    safe_print("Área de exclusão removida.")
+        elif self.modo == "exclusao":
+            for i, (rect_c, rect_p) in enumerate(self.exclusoes):
+                if rect_c.contains(pos):
+                    self.exclusoes.pop(i)
+                    self.update()
                     return
-            self._drag_inicio = (x, y)
-            self._drag_id = None
-        elif modo == "cabecalho":
-            if self.cabecalho_canvas:
-                cx0, cy0, cx1, cy1 = self.canvas.coords(self.cabecalho_canvas)
-                if cx0 <= x <= cx1 and cy0 <= y <= cy1:
-                    self.canvas.delete(self.cabecalho_canvas)
-                    self.cabecalho_canvas = None
-                    self.regiao_cabecalho = None
-                    self.atualizar_status()
-                    safe_print("Região de cabeçalho removida.")
-                    return
-            self._drag_inicio = (x, y)
-            self._drag_id = None
+            self._drag_inicio = pos
+            self._drag_atual = pos
+        elif self.modo == "cabecalho":
+            if self.cabecalho and self.cabecalho[0].contains(pos):
+                self.cabecalho = None
+                self.update()
+                return
+            self._drag_inicio = pos
+            self._drag_atual = pos
 
-    def on_drag(self, event):
-        if self.modo.get() not in ("exclusao", "cabecalho") or self._drag_inicio is None:
+    def mouseMoveEvent(self, event):
+        pos = event.pos()
+        if self._drag_inicio:
+            self._drag_atual = pos
+            self.update()
             return
-        x = self.canvas.canvasx(event.x)
-        y = self.canvas.canvasy(event.y)
-        x0, y0 = self._drag_inicio
-        
-        cor = "darkorange" if self.modo.get() == "exclusao" else "green"
-        preenchimento = "yellow" if self.modo.get() == "exclusao" else "lightgreen"
 
-        if self._drag_id is not None:
-            self.canvas.coords(self._drag_id, x0, y0, x, y)
-        else:
-            self._drag_id = self.canvas.create_rectangle(x0, y0, x, y, outline=cor, width=2, fill=preenchimento, stipple="gray25")
+        self.hover_item = None
+        if self.modo == "vertical":
+            for i, (x, _) in enumerate(self.linhas_v):
+                if abs(x - pos.x()) < 10: self.hover_item = i; break
+        elif self.modo == "horizontal":
+            for i, (y, _) in enumerate(self.linhas_h):
+                if abs(y - pos.y()) < 10: self.hover_item = i; break
+        elif self.modo == "exclusao":
+            for i, (rect, _) in enumerate(self.exclusoes):
+                if rect.contains(pos): self.hover_item = i; break
+        elif self.modo == "cabecalho" and self.cabecalho:
+            if self.cabecalho[0].contains(pos): self.hover_item = "header"
 
-    def on_release(self, event):
-        modo = self.modo.get()
-        if modo not in ("exclusao", "cabecalho") or self._drag_inicio is None:
-            return
-        x = self.canvas.canvasx(event.x)
-        y = self.canvas.canvasy(event.y)
-        x0, y0 = self._drag_inicio
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if not self._drag_inicio: return
+        rect_c = QRect(self._drag_inicio, event.pos()).normalized()
         self._drag_inicio = None
 
-        if self._drag_id is not None:
-            self.canvas.delete(self._drag_id)
-            self._drag_id = None
-        if abs(x - x0) < 5 or abs(y - y0) < 5:
+        if rect_c.width() < 5 or rect_c.height() < 5:
+            self.update()
             return
 
-        x_min, x_max = min(x0, x), max(x0, x)
-        y_min, y_max = min(y0, y), max(y0, y)
+        rect_p = QRect(
+            int(rect_c.x() * self.fator_escala), int(rect_c.y() * self.fator_escala),
+            int(rect_c.width() * self.fator_escala), int(rect_c.height() * self.fator_escala)
+        )
 
-        if modo == "exclusao":
-            rect_id = self.canvas.create_rectangle(x_min, y_min, x_max, y_max, outline="darkorange", width=2, fill="yellow", stipple="gray25")
-            self.retangulos_canvas.append((rect_id, x_min, y_min, x_max, y_max))
-            self.retangulos_exclusao.append((x_min * self.fator_escala, y_min * self.fator_escala, x_max * self.fator_escala, y_max * self.fator_escala))
-            safe_print("Área de exclusão adicionada.")
+        if self.modo == "exclusao":
+            self.exclusoes.append((rect_c, rect_p))
+        elif self.modo == "cabecalho":
+            self.cabecalho = (rect_c, rect_p)
         
-        elif modo == "cabecalho":
-            if self.cabecalho_canvas:
-                self.canvas.delete(self.cabecalho_canvas)
-            
-            self.cabecalho_canvas = self.canvas.create_rectangle(x_min, y_min, x_max, y_max, outline="green", width=2, fill="lightgreen", stipple="gray25")
-            self.regiao_cabecalho = (x_min * self.fator_escala, y_min * self.fator_escala, x_max * self.fator_escala, y_max * self.fator_escala)
-            safe_print("Região de cabeçalho definida.")
-            
-        self.atualizar_status()
+        self._drag_atual = None
+        self.update()
 
     def _toggle_vertical(self, x):
-        mais_proxima = None
-        for i, (line_id, x_canvas) in enumerate(self.linhas_canvas):
-            dist = abs(x_canvas - x)
-            if dist < self.TOLERANCIA_PX:
-                if mais_proxima is None or dist < mais_proxima[0]:
-                    mais_proxima = (dist, i, line_id, x_canvas)
-        if mais_proxima is not None:
-            _, idx, line_id, x_canvas = mais_proxima
-            self.canvas.delete(line_id)
-            self.linhas_canvas.pop(idx)
-            x_pdf = x_canvas * self.fator_escala
-            if self.limites_colunas:
-                idx_l = min(range(len(self.limites_colunas)), key=lambda k: abs(self.limites_colunas[k] - x_pdf))
-                self.limites_colunas.pop(idx_l)
-            self.atualizar_rotulos_colunas() # <--- Atualiza os números
-            self.atualizar_status()
-            safe_print(f"Divisória vertical removida em X={x_pdf:.2f}")
-            return
-        x_pdf = x * self.fator_escala
-        self.limites_colunas.append(x_pdf)
-        self.limites_colunas.sort()
-        line_id = self.canvas.create_line(x, 0, x, self.altura_img, fill="red", width=2)
-        self.linhas_canvas.append((line_id, x))
-        self.atualizar_rotulos_colunas() # <--- Atualiza os números
-        self.atualizar_status()
-        safe_print(f"Divisória vertical adicionada em X={x_pdf:.2f}")
+        for i, (x_c, x_p) in enumerate(self.linhas_v):
+            if abs(x_c - x) < 10:
+                self.linhas_v.pop(i)
+                self.update()
+                return
+        self.linhas_v.append((x, x * self.fator_escala))
+        self.linhas_v.sort(key=lambda item: item[0])
+        self.update()
 
     def _toggle_horizontal(self, y):
-        mais_proxima = None
-        for i, (line_id, y_canvas) in enumerate(self.linhas_horizontais):
-            dist = abs(y_canvas - y)
-            if dist < self.TOLERANCIA_PX:
-                if mais_proxima is None or dist < mais_proxima[0]:
-                    mais_proxima = (dist, i, line_id, y_canvas)
-        if mais_proxima is not None:
-            _, idx, line_id, y_canvas = mais_proxima
-            self.canvas.delete(line_id)
-            self.linhas_horizontais.pop(idx)
-            y_pdf = y_canvas * self.fator_escala
-            if self.limites_linhas:
-                idx_l = min(range(len(self.limites_linhas)), key=lambda k: abs(self.limites_linhas[k] - y_pdf))
-                self.limites_linhas.pop(idx_l)
-            self.atualizar_status()
-            safe_print(f"Limite horizontal removido em Y={y_pdf:.2f}")
-            return
-        y_pdf = y * self.fator_escala
-        self.limites_linhas.append(y_pdf)
-        self.limites_linhas.sort()
-        line_id = self.canvas.create_line(0, y, self.largura_img, y, fill="blue", width=2)
-        self.linhas_horizontais.append((line_id, y))
-        self.atualizar_status()
-        safe_print(f"Limite horizontal adicionado em Y={y_pdf:.2f}")
+        for i, (y_c, y_p) in enumerate(self.linhas_h):
+            if abs(y_c - y) < 10:
+                self.linhas_h.pop(i)
+                self.update()
+                return
+        self.linhas_h.append((y, y * self.fator_escala))
+        self.linhas_h.sort(key=lambda item: item[0])
+        self.update()
+
+# ----------------------------------------------------------------------
+# Janela Principal do Seletor
+# ----------------------------------------------------------------------
+class PDFSelectorWindow(QWidget):
+    def __init__(self, pdf_path, pagina):
+        super().__init__()
+        self.pdf_path = pdf_path
+        self.confirmado = False
+        self.ordem_colunas = None
+        
+        self.setWindowTitle(f"Seletor - Página {pagina}")
+        self.resize(1000, 800)
+        
+        self.initUI()
+        self.carregar_pdf(pagina)
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        h_modos = QHBoxLayout()
+        h_modos.addWidget(QLabel("<b>Modo:</b>"))
+        self.bg_modos = QButtonGroup(self)
+        
+        rb_v = QRadioButton("│ Coluna")
+        rb_h = QRadioButton("─ Limite Y")
+        rb_e = QRadioButton("▭ Exclusão")
+        rb_c = QRadioButton("◳ Cabeçalho")
+        rb_v.setChecked(True)
+        
+        for rb, val in [(rb_v, "vertical"), (rb_h, "horizontal"), (rb_e, "exclusao"), (rb_c, "cabecalho")]:
+            self.bg_modos.addButton(rb)
+            rb.toggled.connect(lambda checked, v=val: self.mudar_modo(v) if checked else None)
+            h_modos.addWidget(rb)
+        
+        h_modos.addStretch()
+        layout.addLayout(h_modos)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setStyleSheet("background-color: #888;")
+        layout.addWidget(self.scroll)
+
+        h_status = QHBoxLayout()
+        self.lbl_status = QLabel("Nenhum elemento marcado")
+        h_status.addWidget(self.lbl_status)
+        h_status.addStretch()
+
+        btn_clear = QPushButton("🗑 Limpar Tudo")
+        btn_clear.clicked.connect(self.limpar_tudo)
+        h_status.addWidget(btn_clear)
+
+        btn_cancel = QPushButton("✖ Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        h_status.addWidget(btn_cancel)
+
+        btn_ok = QPushButton("✔ Iniciar Extração")
+        btn_ok.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold;")
+        btn_ok.clicked.connect(self.iniciar_extracao)
+        h_status.addWidget(btn_ok)
+
+        layout.addLayout(h_status)
+
+    def mudar_modo(self, modo):
+        if hasattr(self, 'canvas'):
+            self.canvas.modo = modo
+            self.canvas.hover_item = None
+            self.canvas.update()
+
+    def carregar_pdf(self, pagina):
+        try:
+            # Feedback visual (cursor de espera)
+            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            
+            with pdfplumber.open(self.pdf_path) as pdf:
+                idx = max(0, min(pagina - 1, len(pdf.pages) - 1))
+                page = pdf.pages[idx]
+                
+                # OTIMIZAÇÃO 1: Renderiza em 300 DPI para máxima qualidade de leitura
+                # OTIMIZAÇÃO 2: .original pega a imagem PIL direto da memória, sem salvar no disco!
+                pil_img = page.to_image(resolution=300).original
+                pil_img = pil_img.convert("RGBA")
+                
+                data = pil_img.tobytes("raw", "RGBA")
+                qimg = QImage(data, pil_img.width, pil_img.height, QImage.Format.Format_RGBA8888)
+                pixmap = QPixmap.fromImage(qimg)
+                
+                pixmap.setDevicePixelRatio(1.0)
+                
+                # Define o limite da tela. Como a imagem agora é 300 DPI (muito grande),
+                # o Qt vai reduzir mantendo a suavidade e a qualidade das letras.
+                LARGURA_MAXIMA = 1400
+                if pil_img.width > LARGURA_MAXIMA:
+                    pixmap = pixmap.scaledToWidth(LARGURA_MAXIMA, Qt.TransformationMode.SmoothTransformation)
+                    pixmap.setDevicePixelRatio(1.0)
+                
+                fator = page.width / pixmap.width()
+                
+                self.canvas = PDFCanvas(pixmap, fator)
+                self.scroll.setWidget(self.canvas)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Erro ao carregar PDF:\n{e}")
+            self.reject()
+        finally:
+            # Remove o cursor de espera
+            QGuiApplication.restoreOverrideCursor()
 
     def atualizar_status(self):
-        n_col = len(self.limites_colunas)
-        n_lin = len(self.limites_linhas)
-        n_exc = len(self.retangulos_exclusao)
-        tem_cab = self.regiao_cabecalho is not None
+        n_col = len(self.canvas.linhas_v) + 1
+        n_lin = len(self.canvas.linhas_h)
+        n_exc = len(self.canvas.exclusoes)
+        tem_cab = self.canvas.cabecalho is not None
         
         partes = []
-        if n_col > 0: partes.append(f"│ {n_col + 1} col")
+        if len(self.canvas.linhas_v) > 0: partes.append(f"│ {n_col} col")
         if n_lin > 0: partes.append(f"─ {n_lin} linha(s)")
         if n_exc > 0: partes.append(f"▭ {n_exc} exclusão(ões)")
         if tem_cab: partes.append("◳ cabeçalho definido")
-        if not partes: partes.append("nenhum elemento marcado")
         
-        self.lbl_status.config(text="  •  ".join(partes))
+        self.lbl_status.setText(" • ".join(partes) if partes else "Nenhum elemento marcado")
 
     def limpar_tudo(self):
-        if not (self.linhas_canvas or self.linhas_horizontais or self.retangulos_canvas or self.cabecalho_canvas):
-            return
-        if not messagebox.askyesno("Limpar tudo", "Remover TODAS as marcações?"):
-            return
-        for line_id, _ in self.linhas_canvas: self.canvas.delete(line_id)
-        for line_id, _ in self.linhas_horizontais: self.canvas.delete(line_id)
-        for rect_id, _, _, _, _ in self.retangulos_canvas: self.canvas.delete(rect_id)
-        if self.cabecalho_canvas: self.canvas.delete(self.cabecalho_canvas)
-        
-        self.linhas_canvas.clear()
-        self.linhas_horizontais.clear()
-        self.retangulos_canvas.clear()
-        self.limites_colunas.clear()
-        self.limites_linhas.clear()
-        self.retangulos_exclusao.clear()
-        self.regiao_cabecalho = None
-        self.cabecalho_canvas = None
-        self.atualizar_rotulos_colunas()
-        self.atualizar_status()
-        safe_print("Todas as marcações foram removidas.")
+        if QMessageBox.question(self, "Limpar", "Remover todas as marcações?") == QMessageBox.StandardButton.Yes:
+            self.canvas.linhas_v.clear()
+            self.canvas.linhas_h.clear()
+            self.canvas.exclusoes.clear()
+            self.canvas.cabecalho = None
+            self.canvas.update()
+            self.atualizar_status()
 
     def iniciar_extracao(self):
-        if not (self.limites_colunas or self.limites_linhas or self.retangulos_exclusao or self.regiao_cabecalho):
-            messagebox.showwarning("Nada marcado", "Adicione pelo menos uma marcação na imagem.")
+        if not (self.canvas.linhas_v or self.canvas.linhas_h or self.canvas.exclusoes or self.canvas.cabecalho):
+            QMessageBox.warning(self, "Aviso", "Adicione pelo menos uma marcação.")
             return
 
-        # Prepara os nomes das colunas para a janela de ordenação
-        num_colunas = len(self.limites_colunas) + 1
+        num_colunas = len(self.canvas.linhas_v) + 1
         nomes = []
-        if self.regiao_cabecalho is not None:
-            nomes.append("◳ Cabeçalho (Dado Fixo)")
-        for i in range(num_colunas):
-            nomes.append(f"Coluna {i+1}")
+        if self.canvas.cabecalho: nomes.append("◳ Cabeçalho (Dado Fixo)")
+        for i in range(num_colunas): nomes.append(f"Coluna {i+1}")
 
         if len(nomes) > 1:
-            dlg = ColumnOrderDialog(self.root, nomes)
-            if dlg.resultado is None:
-                return # Usuário cancelou a reordenação, permanece na tela
-            self.ordem_colunas = dlg.resultado
+            dlg = ColumnOrderDialog(nomes)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self.ordem_colunas = dlg.resultado
+                self.confirmado = True
+                self.close()
         else:
-            self.ordem_colunas = [0]
+            self.confirmado = True
+            self.close()
 
-        self.confirmado = True
-        self.root.destroy()
-
-    def cancelar(self):
+    def reject(self):
         self.confirmado = False
-        self.root.destroy()
+        self.close()
 
-    def fechar_pela_janela(self):
-        if not (self.linhas_canvas or self.linhas_horizontais or self.retangulos_canvas or self.cabecalho_canvas):
-            self.cancelar()
-            return
-        resp = messagebox.askyesno("Confirmar", "Existem marcações pendentes.\nDeseja iniciar a extração?")
-        if resp: self.iniciar_extracao()
-        else: self.cancelar()
+    def closeEvent(self, event):
+        if not self.confirmado and (self.canvas.linhas_v or self.canvas.cabecalho):
+            resp = QMessageBox.question(self, "Confirmar", "Existem marcações pendentes. Deseja iniciar a extração?")
+            if resp == QMessageBox.StandardButton.Yes:
+                self.iniciar_extracao()
+                if self.confirmado: event.accept()
+                else: event.ignore()
+            else:
+                event.accept()
+        else:
+            event.accept()
 
 # ----------------------------------------------------------------------
-# Extração (CSV ou XLSX)
+# Extração Lógica
 # ----------------------------------------------------------------------
 def processar_pdf_avancado(pdf_path, limites_x, caminho_saida, formato, regex_data,
-                           pag_inicio, pag_fim, limites_y=None, exclusoes=None, regiao_cabecalho=None, ordem_colunas=None):
-    limites_y = limites_y or []
-    exclusoes = exclusoes or []
-
+                           pag_inicio, pag_fim, limites_y, exclusoes, regiao_cabecalho, ordem_colunas):
     if formato == "xlsx":
         from openpyxl import Workbook
         wb = Workbook(write_only=True)
         ws = wb.create_sheet(title="Extração")
-        f_csv = None
-        escritor_csv = None
+        f_csv, escritor_csv = None, None
     else:
         f_csv = open(caminho_saida, 'w', newline='', encoding='utf-8')
         escritor_csv = csv.writer(f_csv, delimiter=';')
-        wb = None
-        ws = None
+        wb, ws = None, None
 
     def escrever_linhas(linhas):
         if formato == "xlsx":
@@ -919,182 +650,117 @@ def processar_pdf_avancado(pdf_path, limites_x, caminho_saida, formato, regex_da
             inicio = max(1, min(pag_inicio, total_paginas))
             fim = max(inicio, min(pag_fim, total_paginas))
 
-            if len(limites_y) >= 2:
-                y_min_ext = min(limites_y)
-                y_max_ext = max(limites_y)
-                safe_print(f"Limite Y ativo: extração entre Y={y_min_ext:.1f} e Y={y_max_ext:.1f}")
-            else:
-                y_min_ext, y_max_ext = 0.0, float('inf')
-
-            safe_print(f"\nIniciando extração ({formato.upper()}): Páginas {inicio} até {fim}")
-            if ordem_colunas:
-                safe_print(f"Ordem customizada das colunas: {ordem_colunas}")
+            y_min_ext = min(limites_y) if len(limites_y) >= 2 else 0
+            y_max_ext = max(limites_y) if len(limites_y) >= 2 else float('inf')
 
             ultimo_cabecalho = ""
 
             for num_pag in range(inicio - 1, fim):
                 pagina = pdf.pages[num_pag]
-                dados_da_pagina = []
+                dados_pag = []
 
-                texto_cabecalho = ""
+                texto_cab = ""
                 if regiao_cabecalho:
                     try:
-                        recorte = pagina.within_bbox(regiao_cabecalho)
-                        bruto = recorte.extract_text()
-                        if bruto:
-                            texto_cabecalho = " ".join(bruto.split())
-                    except Exception as e:
-                        safe_print(f"Aviso: não foi possível extrair cabeçalho na pág {num_pag+1}: {e}")
+                        rx, ry, rw, rh = regiao_cabecalho
+                        bbox = (rx, ry, rx + rw, ry + rh)
+                        bruto = pagina.within_bbox(bbox).extract_text()
+                        if bruto: texto_cab = " ".join(bruto.split())
+                    except Exception:
+                        pass
 
-                    if texto_cabecalho:
-                        ultimo_cabecalho = texto_cabecalho
-                    else:
-                        texto_cabecalho = ultimo_cabecalho
-                        if texto_cabecalho:
-                            safe_print(f"-> Página {num_pag+1} sem cabeçalho. Reutilizando: '{texto_cabecalho}'")
+                    if texto_cab: ultimo_cabecalho = texto_cab
+                    else: texto_cab = ultimo_cabecalho
 
                 largura_total = pagina.width
                 limites_completos = [0] + limites_x + [largura_total]
-
                 palavras = pagina.extract_words(x_tolerance=3, y_tolerance=3)
-                palavras_filtradas = []
                 
+                palavras_filtradas = []
                 for p in palavras:
-                    y_center = (p['top'] + p['bottom']) / 2
-                    x_center = (p['x0'] + p['x1']) / 2
-                    if y_center < y_min_ext or y_center > y_max_ext:
+                    y_c = (p['top'] + p['bottom']) / 2
+                    x_c = (p['x0'] + p['x1']) / 2
+                    if y_c < y_min_ext or y_c > y_max_ext: continue
+                    
+                    if any(ex.x() <= x_c <= ex.x()+ex.width() and ex.y() <= y_c <= ex.y()+ex.height() for ex in exclusoes):
                         continue
                     
-                    excluido = False
-                    for (ex0, ey0, ex1, ey1) in exclusoes:
-                        if ex0 <= x_center <= ex1 and ey0 <= y_center <= ey1:
-                            excluido = True
-                            break
-                    if excluido: continue
-                    
                     if regiao_cabecalho:
-                        cx0, cy0, cx1, cy1 = regiao_cabecalho
-                        if cx0 <= x_center <= cx1 and cy0 <= y_center <= cy1:
+                        rx, ry, rw, rh = regiao_cabecalho
+                        if rx <= x_c <= rx + rw and ry <= y_c <= ry + rh:
                             continue
-                            
                     palavras_filtradas.append(p)
 
                 linhas_por_y = {}
                 for p in palavras_filtradas:
                     achou = False
-                    for y_existente in linhas_por_y.keys():
-                        if abs(y_existente - p['top']) < 5:
-                            linhas_por_y[y_existente].append(p)
+                    for y_ex in linhas_por_y:
+                        if abs(y_ex - p['top']) < 5:
+                            linhas_por_y[y_ex].append(p)
                             achou = True
                             break
-                    if not achou:
-                        linhas_por_y[p['top']] = [p]
+                    if not achou: linhas_por_y[p['top']] = [p]
 
-                for y_top in sorted(linhas_por_y.keys()):
-                    palavras_da_linha = sorted(linhas_por_y[y_top], key=lambda x: x['x0'])
-                    texto_completo = " ".join([p['text'] for p in palavras_da_linha]).strip()
+                for y_top in sorted(linhas_por_y):
+                    p_linha = sorted(linhas_por_y[y_top], key=lambda x: x['x0'])
+                    txt_completo = " ".join([p['text'] for p in p_linha]).strip()
 
-                    if regex_data:
-                        if not regex_data.match(texto_completo): continue
-                    else:
-                        if not texto_completo: continue
+                    if regex_data and not regex_data.match(txt_completo): continue
+                    if not txt_completo: continue
 
-                    campos_linha = [""] * (len(limites_completos) - 1)
-                    for p in palavras_da_linha:
-                        x_centro = (p['x0'] + p['x1']) / 2
+                    campos = [""] * (len(limites_completos) - 1)
+                    for p in p_linha:
+                        x_c = (p['x0'] + p['x1']) / 2
                         for i in range(len(limites_completos) - 1):
-                            if limites_completos[i] <= x_centro < limites_completos[i + 1]:
-                                if campos_linha[i]:
-                                    campos_linha[i] += " " + p['text']
-                                else:
-                                    campos_linha[i] = p['text']
+                            if limites_completos[i] <= x_c < limites_completos[i + 1]:
+                                campos[i] += (" " + p['text'] if campos[i] else p['text'])
                                 break
                     
-                    # Monta a linha base (Cabeçalho + Colunas)
-                    if regiao_cabecalho is not None:
-                        linha_completa = [texto_cabecalho] + campos_linha
-                    else:
-                        linha_completa = campos_linha
+                    linha_completa = [texto_cab] + campos if regiao_cabecalho else campos
 
-                    # Aplica a reordenação, se definida
                     if ordem_colunas:
-                        linha_completa = [linha_completa[i] for i in ordem_colunas]
+                        dic_cols = {}
+                        if regiao_cabecalho: dic_cols["◳ Cabeçalho (Dado Fixo)"] = texto_cab
+                        for i, c in enumerate(campos): dic_cols[f"Coluna {i+1}"] = c
+                        linha_completa = [dic_cols[nome] for nome in ordem_colunas]
 
-                    dados_da_pagina.append(linha_completa)
+                    dados_pag.append(linha_completa)
 
-                if dados_da_pagina:
-                    escrever_linhas(dados_da_pagina)
-                    safe_print(f"-> Página {num_pag + 1} gravada com sucesso.")
+                if dados_pag: escrever_linhas(dados_pag)
 
-        if formato == "xlsx":
-            wb.save(caminho_saida)
+        if formato == "xlsx": wb.save(caminho_saida)
     finally:
-        if f_csv is not None:
-            f_csv.close()
+        if f_csv: f_csv.close()
 
-    msg = f"Processamento concluído ({formato.upper()})!\nSalvo em: {caminho_saida}"
-    safe_print(msg)
-    try:
-        messagebox.showinfo("Sucesso", msg)
-    except Exception:
-        pass
-
-def executar_fluxo(pdf, caminho_saida, pag_inicio, pag_fim, regex_data, formato):
-    try:
-        root = tk.Tk()
-        app = PDFColumnSelector(root, pdf, pag_inicio)
-        root.mainloop()
-    except Exception as e:
-        safe_print(f"Erro ao abrir PDF: {e}")
-        return
-
-    if not app.confirmado:
-        safe_print("Execução cancelada pelo usuário.")
-        return
-
-    processar_pdf_avancado(
-        pdf, app.limites_colunas, caminho_saida, formato, regex_data,
-        pag_inicio, pag_fim,
-        limites_y=app.limites_linhas,
-        exclusoes=app.retangulos_exclusao,
-        regiao_cabecalho=app.regiao_cabecalho,
-        ordem_colunas=app.ordem_colunas
-    )
+    QMessageBox.information(None, "Sucesso", f"Extração concluída!\nSalvo em: {caminho_saida}")
 
 # ----------------------------------------------------------------------
-# Entrada
+# Main
 # ----------------------------------------------------------------------
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extrator Geométrico de PDF para CSV/XLSX.")
-    parser.add_argument("pdf", nargs="?", help="Caminho do PDF de entrada.")
-    parser.add_argument("csv", nargs="?", help="Caminho do arquivo de saída (.csv ou .xlsx).")
-    parser.add_argument("-f", "--formato", choices=["csv", "xlsx"], default=None, help="Formato de saída.")
-    parser.add_argument("-d", "--data-formato", default=None, help="Máscara(s) de data. Ex: 'dd/mm/aaaa, dd mmm'")
-    parser.add_argument("--auto-data", action="store_true", help="Detecção automática de datas.")
-    parser.add_argument("-p", "--paginas", default="1-end", help="Intervalo de páginas (ex: 5-30).")
-
-    args = parser.parse_args()
-
-    if args.pdf and args.csv:
-        if not os.path.exists(args.pdf):
-            safe_print(f"Erro: arquivo {args.pdf} não encontrado.")
-            sys.exit(1)
-        formato = args.formato or inferir_formato(args.csv)
-        saida = garantir_extensao(args.csv, formato)
-        if formato == "xlsx" and not verificar_openpyxl(): sys.exit(1)
+def main():
+    app = QApplication(sys.argv)
+    
+    config = ConfigDialog()
+    if config.exec() == QDialog.DialogCode.Accepted:
+        pdf, out, p_ini, p_fim, regex, fmt = config.resultado
         
-        regex_data = REGEX_DATA_AUTO if args.auto_data else (converter_mascaras_para_regex(args.data_formato) if args.data_formato else None)
-        try:
-            pag_inicio, pag_fim = parse_paginas(args.paginas)
-        except ValueError:
-            safe_print("Erro: intervalo de páginas inválido.")
-            sys.exit(1)
+        seletor = PDFSelectorWindow(pdf, p_ini)
+        seletor.show()
+        app.exec()
 
-        executar_fluxo(args.pdf, saida, pag_inicio, pag_fim, regex_data, formato)
+        if seletor.confirmado:
+            lim_x = [x_pdf for _, x_pdf in seletor.canvas.linhas_v]
+            lim_y = [y_pdf for _, y_pdf in seletor.canvas.linhas_h]
+            exc_pdf = [rect_p for _, rect_p in seletor.canvas.exclusoes]
+            
+            cab = None
+            if seletor.canvas.cabecalho:
+                r_pdf = seletor.canvas.cabecalho[1]
+                cab = (r_pdf.x(), r_pdf.y(), r_pdf.width(), r_pdf.height())
+            
+            processar_pdf_avancado(pdf, lim_x, out, fmt, regex, p_ini, p_fim, lim_y, exc_pdf, cab, seletor.ordem_colunas)
     else:
-        root = tk.Tk()
-        config = ConfigWindow(root)
-        root.mainloop()
-        if config.resultado:
-            pdf, csv_path, pag_inicio, pag_fim, regex_data, formato = config.resultado
-            executar_fluxo(pdf, csv_path, pag_inicio, pag_fim, regex_data, formato)
+        print("Cancelado.")
+
+if __name__ == "__main__":
+    main()
