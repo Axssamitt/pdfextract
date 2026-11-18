@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
-import time
 import argparse
 import importlib.util
 import re
@@ -38,7 +37,7 @@ if not verificar_dependencias():
 from PyQt6.QtWidgets import (QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QRadioButton, QButtonGroup,
                              QCheckBox, QFileDialog, QMessageBox, QScrollArea, QListWidget)
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QBrush, QFont, QImage
+from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QBrush, QFont, QImage, QGuiApplication
 from PyQt6.QtCore import Qt, QPoint, QRect, QSize
 import pdfplumber
 from PIL import Image
@@ -103,10 +102,8 @@ class ConfigDialog(QDialog):
 
     def initUI(self):
         layout = QVBoxLayout(self)
-
         layout.addWidget(QLabel("<b>Configure a extração antes de escolher as colunas:</b>"))
 
-        # PDF
         h_pdf = QHBoxLayout()
         h_pdf.addWidget(QLabel("Arquivo PDF:"))
         self.txt_pdf = QLineEdit()
@@ -116,7 +113,6 @@ class ConfigDialog(QDialog):
         h_pdf.addWidget(btn_pdf)
         layout.addLayout(h_pdf)
 
-        # Saída
         h_out = QHBoxLayout()
         h_out.addWidget(QLabel("Arquivo de saída:"))
         self.txt_out = QLineEdit()
@@ -126,7 +122,6 @@ class ConfigDialog(QDialog):
         h_out.addWidget(btn_out)
         layout.addLayout(h_out)
 
-        # Formato
         h_fmt = QHBoxLayout()
         h_fmt.addWidget(QLabel("Formato de saída:"))
         self.rb_csv = QRadioButton("CSV (separado por ;)")
@@ -138,7 +133,6 @@ class ConfigDialog(QDialog):
         h_fmt.addStretch()
         layout.addLayout(h_fmt)
 
-        # Páginas
         h_pag = QHBoxLayout()
         h_pag.addWidget(QLabel("Intervalo de páginas:"))
         self.txt_pag = QLineEdit("1-end")
@@ -148,7 +142,6 @@ class ConfigDialog(QDialog):
         h_pag.addStretch()
         layout.addLayout(h_pag)
 
-        # Filtro Data
         self.chk_filtro = QCheckBox("Filtrar linhas por data")
         self.chk_filtro.toggled.connect(self.toggle_filtro)
         layout.addWidget(self.chk_filtro)
@@ -167,7 +160,6 @@ class ConfigDialog(QDialog):
 
         layout.addStretch()
 
-        # Botões
         h_btn = QHBoxLayout()
         btn_ok = QPushButton("Iniciar")
         btn_ok.clicked.connect(self.iniciar)
@@ -310,10 +302,10 @@ class PDFCanvas(QWidget):
         self.setFixedSize(pixmap.size())
         self.setMouseTracking(True)
 
-        self.linhas_v = [] # [(x_canvas, x_pdf)]
-        self.linhas_h = [] # [(y_canvas, y_pdf)]
-        self.exclusoes = [] # [(QRect_canvas, QRect_pdf)]
-        self.cabecalho = None # QRect_canvas, QRect_pdf
+        self.linhas_v = [] 
+        self.linhas_h = [] 
+        self.exclusoes = [] 
+        self.cabecalho = None 
 
         self.modo = "vertical"
         self.hover_item = None
@@ -326,7 +318,6 @@ class PDFCanvas(QWidget):
         painter.drawPixmap(0, 0, self.pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Desenha Linhas Verticais
         for i, (x_c, x_p) in enumerate(self.linhas_v):
             if self.modo == "vertical" and self.hover_item == i:
                 painter.setPen(QPen(QColor("orange"), 4))
@@ -334,7 +325,6 @@ class PDFCanvas(QWidget):
                 painter.setPen(QPen(QColor("red"), 2))
             painter.drawLine(int(x_c), 0, int(x_c), self.height())
 
-        # Desenha Linhas Horizontais
         for i, (y_c, y_p) in enumerate(self.linhas_h):
             if self.modo == "horizontal" and self.hover_item == i:
                 painter.setPen(QPen(QColor("cyan"), 4))
@@ -342,7 +332,6 @@ class PDFCanvas(QWidget):
                 painter.setPen(QPen(QColor("blue"), 2))
             painter.drawLine(0, int(y_c), self.width(), int(y_c))
 
-        # Desenha Exclusões
         for i, (rect_c, rect_p) in enumerate(self.exclusoes):
             if self.modo == "exclusao" and self.hover_item == i:
                 painter.setPen(QPen(QColor("red"), 3))
@@ -352,7 +341,6 @@ class PDFCanvas(QWidget):
                 painter.setBrush(QBrush(QColor(255, 200, 0, 50)))
             painter.drawRect(rect_c)
 
-        # Desenha Cabeçalho
         if self.cabecalho:
             rect_c, rect_p = self.cabecalho
             if self.modo == "cabecalho" and self.hover_item == "header":
@@ -363,7 +351,6 @@ class PDFCanvas(QWidget):
                 painter.setBrush(QBrush(QColor(144, 238, 144, 80)))
             painter.drawRect(rect_c)
 
-        # Desenha a área de drag em andamento
         if self._drag_inicio and self._drag_atual:
             rect = QRect(self._drag_inicio, self._drag_atual).normalized()
             cor = QColor("darkorange") if self.modo == "exclusao" else QColor("green")
@@ -371,7 +358,6 @@ class PDFCanvas(QWidget):
             painter.setBrush(QBrush(QColor(cor.red(), cor.green(), cor.blue(), 50)))
             painter.drawRect(rect)
 
-        # Desenha Rótulos das Colunas
         if self.linhas_v:
             xs = [0] + [x for x, _ in self.linhas_v] + [self.width()]
             painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
@@ -490,7 +476,6 @@ class PDFSelectorWindow(QWidget):
     def initUI(self):
         layout = QVBoxLayout(self)
 
-        # Barra de Modos
         h_modos = QHBoxLayout()
         h_modos.addWidget(QLabel("<b>Modo:</b>"))
         self.bg_modos = QButtonGroup(self)
@@ -509,13 +494,11 @@ class PDFSelectorWindow(QWidget):
         h_modos.addStretch()
         layout.addLayout(h_modos)
 
-        # Scroll Area para o PDF
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setStyleSheet("background-color: #888;")
         layout.addWidget(self.scroll)
 
-        # Barra de Status e Botões
         h_status = QHBoxLayout()
         self.lbl_status = QLabel("Nenhum elemento marcado")
         h_status.addWidget(self.lbl_status)
@@ -544,38 +527,42 @@ class PDFSelectorWindow(QWidget):
 
     def carregar_pdf(self, pagina):
         try:
+            # Feedback visual (cursor de espera)
+            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            
             with pdfplumber.open(self.pdf_path) as pdf:
                 idx = max(0, min(pagina - 1, len(pdf.pages) - 1))
                 page = pdf.pages[idx]
                 
-                img_obj = page.to_image(resolution=150)
-                img_path = os.path.join(os.getcwd(), "pdf_preview_qt.png")
-                img_obj.save(img_path, format="PNG")
-                
-                pil_img = Image.open(img_path)
-                
-                # CORREÇÃO AQUI: Converte para RGBA antes de extrair os bytes
+                # OTIMIZAÇÃO 1: Renderiza em 300 DPI para máxima qualidade de leitura
+                # OTIMIZAÇÃO 2: .original pega a imagem PIL direto da memória, sem salvar no disco!
+                pil_img = page.to_image(resolution=300).original
                 pil_img = pil_img.convert("RGBA")
                 
                 data = pil_img.tobytes("raw", "RGBA")
                 qimg = QImage(data, pil_img.width, pil_img.height, QImage.Format.Format_RGBA8888)
                 pixmap = QPixmap.fromImage(qimg)
                 
-                if pil_img.width > 1200:
-                    pixmap = pixmap.scaledToWidth(1200, Qt.TransformationMode.SmoothTransformation)
+                pixmap.setDevicePixelRatio(1.0)
+                
+                # Define o limite da tela. Como a imagem agora é 300 DPI (muito grande),
+                # o Qt vai reduzir mantendo a suavidade e a qualidade das letras.
+                LARGURA_MAXIMA = 1400
+                if pil_img.width > LARGURA_MAXIMA:
+                    pixmap = pixmap.scaledToWidth(LARGURA_MAXIMA, Qt.TransformationMode.SmoothTransformation)
+                    pixmap.setDevicePixelRatio(1.0)
                 
                 fator = page.width / pixmap.width()
                 
                 self.canvas = PDFCanvas(pixmap, fator)
                 self.scroll.setWidget(self.canvas)
                 
-                # Conecta os sinais para atualizar o status automaticamente
-                # Precisamos recriar o laço de eventos, ou podemos usar um timer. 
-                # Para simplificar, o status será atualizado quando o mouse for solto.
-                
         except Exception as e:
             QMessageBox.critical(self, "Erro", f"Erro ao carregar PDF:\n{e}")
             self.reject()
+        finally:
+            # Remove o cursor de espera
+            QGuiApplication.restoreOverrideCursor()
 
     def atualizar_status(self):
         n_col = len(self.canvas.linhas_v) + 1
@@ -762,8 +749,8 @@ def main():
         app.exec()
 
         if seletor.confirmado:
-            lim_x = [x for x, _ in seletor.canvas.linhas_v]
-            lim_y = [y for y, _ in seletor.canvas.linhas_h]
+            lim_x = [x_pdf for _, x_pdf in seletor.canvas.linhas_v]
+            lim_y = [y_pdf for _, y_pdf in seletor.canvas.linhas_h]
             exc_pdf = [rect_p for _, rect_p in seletor.canvas.exclusoes]
             
             cab = None
